@@ -7,15 +7,15 @@ from torch_ac.algos.base import BaseAlgo
 class A2CAlgo(BaseAlgo):
     """The Advantage Actor-Critic algorithm."""
 
-    def __init__(self, envs, acmodel, device=None, num_frames_per_proc=None, discount=0.99, lr=0.01, gae_lambda=0.95,
+    def __init__(self, envs, arch, device=None, num_frames_per_proc=None, discount=0.99, lr=0.01, gae_lambda=0.95,
                  entropy_coef=0.01, value_loss_coef=0.5, max_grad_norm=0.5, recurrence=4,
                  rmsprop_alpha=0.99, rmsprop_eps=1e-8, preprocess_obss=None, reshape_reward=None):
         num_frames_per_proc = num_frames_per_proc or 8
 
-        super().__init__(envs, acmodel, device, num_frames_per_proc, discount, lr, gae_lambda, entropy_coef,
+        super().__init__(envs, arch, device, num_frames_per_proc, discount, lr, gae_lambda, entropy_coef,
                          value_loss_coef, max_grad_norm, recurrence, preprocess_obss, reshape_reward)
 
-        self.optimizer = torch.optim.RMSprop(self.acmodel.parameters(), lr,
+        self.optimizer = torch.optim.RMSprop(self.arch.parameters(), lr,
                                              alpha=rmsprop_alpha, eps=rmsprop_eps)
 
     def update_parameters(self, exps):
@@ -33,7 +33,7 @@ class A2CAlgo(BaseAlgo):
 
         # Initialize memory
 
-        if self.acmodel.recurrent:
+        if self.arch.recurrent:
             memory = exps.memory[inds]
 
         for i in range(self.recurrence):
@@ -43,10 +43,10 @@ class A2CAlgo(BaseAlgo):
 
             # Compute loss
 
-            if self.acmodel.recurrent:
-                dist, value, memory = self.acmodel(sb.obs, memory * sb.mask)
+            if self.arch.recurrent:
+                dist, value, memory = self.arch(sb.obs, memory * sb.mask)
             else:
-                dist, value = self.acmodel(sb.obs)
+                dist, value = self.arch(sb.obs)
 
             entropy = dist.entropy().mean()
 
@@ -76,8 +76,8 @@ class A2CAlgo(BaseAlgo):
 
         self.optimizer.zero_grad()
         update_loss.backward()
-        update_grad_norm = sum(p.grad.data.norm(2) ** 2 for p in self.acmodel.parameters()) ** 0.5
-        torch.nn.utils.clip_grad_norm_(self.acmodel.parameters(), self.max_grad_norm)
+        update_grad_norm = sum(p.grad.data.norm(2) ** 2 for p in self.arch.parameters()) ** 0.5
+        torch.nn.utils.clip_grad_norm_(self.arch.parameters(), self.max_grad_norm)
         self.optimizer.step()
 
         # Log some values
