@@ -4,9 +4,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 
+import torch_ac
 from torch_ac.algos.oc import OCModel
 from torch_ac.algos.ppo import PPOAlgo
 from torch_ac.algos.base import BaseAlgo
+
 
 class PPOCAlgo(PPOAlgo):
     """The Proximal Policy Optimization algorithm
@@ -26,6 +28,7 @@ class PPOCAlgo(PPOAlgo):
         self.options = torch.zeros(*shape, device=self.device, dtype=torch.int)
         #TODO: fix tuple strucutre
         self.dones = torch.zeros(*shape, device=self.device)
+
 
     def select_option(self, option_probs):
         # sample option based on option probabilities
@@ -64,7 +67,8 @@ class PPOCAlgo(PPOAlgo):
 
                     # sub-batch of experience
                     sb = exps[inds + i]
-                    
+
+                    # TODO (berlier) continue handling of option_dist
                     # select options
                     option_select = []
                     for obs, option_dist in zip(sb.obs, sb.option_dist):
@@ -180,18 +184,25 @@ class PPOCAlgo(PPOAlgo):
 
         for i in range(self.num_frames_per_proc):
             # do one agent-environment interaction
+            # TODO handle recurrent flag? Or remove it
             preprocessed_obs = self.preprocess_obss(self.obs, device=self.device)
             with torch.no_grad():
                 if self.arch.recurrent:
                     dist, value, option_dist, memory = self.arch(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
                 else:
-                    dist, option_dist, value = self.arch(preprocessed_obs)
+                    # TODO confirm return arg order
+                    # dist, option_dist, value = self.arch(preprocessed_obs)
+                    dist, value, option_dist = self.arch(preprocessed_obs)
             option = option_dist.sample()
             action = dist.sample()
 
             obs, reward, terminated, truncated, _ = self.env.step(action.cpu().numpy())
             done = tuple(a | b for a, b in zip(terminated, truncated))
             #TODO: need to account for deliberation cost
+
+            # add option_dist to prior obs
+            for n_proc in range(self.num_procs):
+                self.obs[n_proc]['option_dist'] = option_dist.logits.detach().cpu().numpy()[n_proc, :]
 
             # update experiences values
             self.obss[i] = self.obs
@@ -212,7 +223,7 @@ class PPOCAlgo(PPOAlgo):
                 self.rewards[i] = torch.tensor(reward, device=self.device)
             self.log_probs[i] = dist.log_prob(action)
             self.options[i] = option
-            self.dones[i] = done
+            self.dones[i] = torch.tensor(done, device=self.device, dtype=torch.bool)
 
             # update log values
             self.log_episode_return += torch.tensor(reward, device=self.device, dtype=torch.float)
@@ -232,12 +243,22 @@ class PPOCAlgo(PPOAlgo):
 
         # Add advantage and return to experiences
 
+        # Get the next_value for the last element in the self.obs list
+        # This gets a single additional next_value
         preprocessed_obs = self.preprocess_obss(self.obs, device=self.device)
         with torch.no_grad():
+            # handle 4 len tuple from OCModel, unlike the other 3 len tuples
+            # from OCModel its (dist, value, option_dist, memory)
             if self.arch.recurrent:
-                _, next_value, _ = self.arch(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
+                dist, next_value, option_dist, memory = self.arch(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
             else:
-                _, next_value = self.arch(preprocessed_obs)
+                # TODO confirm arg order
+                dist, next_value, option_dist = self.arch(preprocessed_obs)
+
+            # if self.arch.recurrent:
+            #     _, next_value, _ = self.arch(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
+            # else:
+            #     _, next_value = self.arch(preprocessed_obs)
 
         for i in reversed(range(self.num_frames_per_proc)):
             next_mask = self.masks[i+1] if i < self.num_frames_per_proc - 1 else self.mask
@@ -257,7 +278,7 @@ class PPOCAlgo(PPOAlgo):
         #   - P is self.num_procs,
         #   - D is the dimensionality.
 
-        exps = DictList()
+        exps = torch_ac.DictList()
         exps.obs = [self.obss[i][j]
                     for j in range(self.num_procs)
                     for i in range(self.num_frames_per_proc)]

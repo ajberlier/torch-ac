@@ -4,13 +4,15 @@ import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 
 from model import ACModel
-from torch_ac.algos.base import BaseAlgo
 
 class OCModel(ACModel):
     # TODO: cite OC paper here
 
     def __init__(self, env_obs_space, action_space, num_options, use_memory=False, use_text=False):
         super(OCModel, self).__init__(env_obs_space, action_space,  use_memory=False, use_text=False)
+
+        # super never records action space, so keep a copy here
+        self.action_space = action_space
 
         # TODO: add arg for hidden layer width; hard coded as 64 for now as a carry over from original torch_ac repo
 
@@ -37,8 +39,8 @@ class OCModel(ACModel):
         )
 
     # override ACModel forward pass
-    def forward(self):
-        x = self.obs.image.transpose(1, 3).transpose(2, 3)
+    def forward(self, obs, memory):
+        x = obs.image.transpose(1, 3).transpose(2, 3)
         x = self.image_conv(x)
         x = x.reshape(x.shape[0], -1)
 
@@ -61,6 +63,6 @@ class OCModel(ACModel):
         value = x.squeeze(1)
 
         x = self.options(embedding)
-        option_dist = self.options(x)
+        option_dist = Categorical(logits=F.log_softmax(x, dim=1))
 
         return dist, value, option_dist, memory
