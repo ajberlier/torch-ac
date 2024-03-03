@@ -34,7 +34,7 @@ class PPOCAlgo(PPOAlgo):
         # sample option based on option probabilities
         option_dist = torch.distributions.Categorical(option_probs)
         option = option_dist.sample()
-        return option.item()
+
 
     def update_parameters(self, exps):
         # Collect experiences
@@ -68,13 +68,14 @@ class PPOCAlgo(PPOAlgo):
                     # sub-batch of experience
                     sb = exps[inds + i]
 
-                    # TODO (berlier) continue handling of option_dist
                     # select options
-                    option_select = []
-                    for obs, option_dist in zip(sb.obs, sb.option_dist):
-                        option = self.select_option(obs, option_dist)
-                        option_select.append(option)
-                    option_select = torch.tensor(option_select)
+                    # option_select = []
+                    # for obs, option_dist in zip(sb.obs, sb.option_dist):
+                        # option = self.select_option(obs, option_dist)
+                    option_probs = sb.obs.option_dist
+                    option_dist = torch.distributions.Categorical(option_probs)
+                    option_select = option_dist.sample()
+                    # TODO ?? option_select is unused
 
                     if self.arch.recurrent:
                         dist, value, option_dist, memory = self.arch(sb.obs, memory * sb.mask)
@@ -95,6 +96,7 @@ class PPOCAlgo(PPOAlgo):
 
                     # TODO: needs work vvv
                     # termination condition
+                    # TODO sb does not have dones
                     option_termination_mask = torch.zeros_like(sb.dones)
                     for i, done in enumerate(sb.dones):
                         if done or options[i] == 1:  # terminate option on episode end or when a new option is selected

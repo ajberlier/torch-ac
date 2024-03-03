@@ -63,6 +63,7 @@ class OCModel(ACModel):
         value = x.squeeze(1)
 
         x = self.options(embedding)
-        option_dist = Categorical(logits=F.log_softmax(x, dim=1))
+        # option_dist = Categorical(logits=F.log_softmax(x, dim=1))
+        option_dist = F.log_softmax(x, dim=1)
 
         return dist, value, option_dist, memory
