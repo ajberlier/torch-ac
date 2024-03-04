@@ -11,8 +11,8 @@ from torch_ac.algos.base import BaseAlgo
 
 
 class PPOCAlgo(PPOAlgo):
-    """The Proximal Policy Optimization algorithm
-    ([Schulman et al., 2015](https://arxiv.org/abs/1707.06347))."""
+    """Proximal Policy Option-Critic algorithm
+    ([Klissarov et al., 2017](https://drive.google.com/file/d/1Arr3LcOzB_M80Ku_mVgY2Q88g0LBTk_X/view))."""
 
     def __init__(self, envs, arch, num_options, device=None, num_frames_per_proc=None, discount=0.99, lr=0.001, gae_lambda=0.95,
                  entropy_coef=0.01, value_loss_coef=0.5, max_grad_norm=0.5, recurrence=4,
@@ -72,9 +72,9 @@ class PPOCAlgo(PPOAlgo):
                     # option_select = []
                     # for obs, option_dist in zip(sb.obs, sb.option_dist):
                         # option = self.select_option(obs, option_dist)
-                    option_probs = sb.obs.option_dist
-                    option_dist = torch.distributions.Categorical(option_probs)
-                    option_select = option_dist.sample()
+                    # option_probs = sb.obs.option_dist
+                    # option_dist = torch.distributions.Categorical(option_probs)
+                    # option_select = option_dist.sample()
                     # TODO ?? option_select is unused
 
                     if self.arch.recurrent:
@@ -96,19 +96,22 @@ class PPOCAlgo(PPOAlgo):
 
                     # TODO: needs work vvv
                     # termination condition
-                    # TODO sb does not have dones
+                    # TODO option critic paper code uses "dones" from the environment, but I am not sure that is what was intended...
                     option_termination_mask = torch.zeros_like(sb.dones)
                     for i, done in enumerate(sb.dones):
-                        if done or options[i] == 1:  # terminate option on episode end or when a new option is selected
+                        if done or sb.options[i] == 1:  # terminate option on episode end or when a new option is selected
                             option_termination_mask[i] = 1
 
                     # options - value loss
-                    option = F.softmax(sb.option_dist, dim=-1)
-                    option_loss = -torch.log(option.gather(1, options.unsqueeze(1))).squeeze() * option_termination_mask
+                    option = F.softmax(option_dist.logits, dim=-1)
+                    option_loss = -torch.log(option.gather(1, sb.options.unsqueeze(1).long())).squeeze() * option_termination_mask
                     option_loss = option_loss.mean()
                     
                     # compute loss
+                    # TODO: should entropy be applied to the policy over options or intra-option policy? I think over options now... 
                     entropy = dist.entropy().mean()
+                    # TODO: add self.option_loss_coef 
+                    self.option_loss_coef = 1
                     loss = policy_loss - self.entropy_coef * entropy + self.value_loss_coef * value_loss + self.option_loss_coef * option_loss
                     # TODO: needs work ^^^
 
@@ -296,6 +299,8 @@ class PPOCAlgo(PPOAlgo):
         exps.advantage = self.advantages.transpose(0, 1).reshape(-1)
         exps.returnn = exps.value + exps.advantage
         exps.log_prob = self.log_probs.transpose(0, 1).reshape(-1)
+        exps.dones = self.dones.transpose(0, 1).reshape(-1)
+        exps.options = self.options.transpose(0, 1).reshape(-1)
 
         # Preprocess experiences
 

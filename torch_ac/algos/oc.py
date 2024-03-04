@@ -14,9 +14,11 @@ class OCModel(ACModel):
         # super never records action space, so keep a copy here
         self.action_space = action_space
 
+        self.num_options = num_options
+
         # TODO: add arg for hidden layer width; hard coded as 64 for now as a carry over from original torch_ac repo
 
-        # ACModel overrides
+        # override ACModel networks
         # actor
         self.actor = nn.Sequential(
             nn.Linear(self.embedding_size, 64),
@@ -35,7 +37,7 @@ class OCModel(ACModel):
         self.options = nn.Sequential(
             nn.Linear(self.embedding_size, 64),
             nn.Tanh(),
-            nn.Linear(64, num_options)
+            nn.Linear(64, self.num_options)
         )
 
     # override ACModel forward pass
@@ -63,7 +65,7 @@ class OCModel(ACModel):
         value = x.squeeze(1)
 
         x = self.options(embedding)
-        # option_dist = Categorical(logits=F.log_softmax(x, dim=1))
-        option_dist = F.log_softmax(x, dim=1)
+        option_dist = Categorical(logits=F.log_softmax(x, dim=1))
+        # option_dist = F.log_softmax(x, dim=1)
 
         return dist, value, option_dist, memory
