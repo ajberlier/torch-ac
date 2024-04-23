@@ -164,6 +164,9 @@ cython_debug/
 .vscode
 .idea
 
+### SLURM ###
+.out
+
 ### Mac OS ###
 .DS_Store
 
