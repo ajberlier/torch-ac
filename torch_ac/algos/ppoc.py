@@ -195,8 +195,6 @@ class PPOCAlgo(PPOAlgo):
                 if self.arch.recurrent:
                     dist, value, option_dist, memory = self.arch(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
                 else:
-                    # TODO confirm return arg order
-                    # dist, option_dist, value = self.arch(preprocessed_obs)
                     dist, value, option_dist = self.arch(preprocessed_obs)
             option = option_dist.sample()
             action = dist.sample()

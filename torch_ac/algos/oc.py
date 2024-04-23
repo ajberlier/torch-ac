@@ -58,14 +58,13 @@ class OCModel(ACModel):
             embed_text = self._get_embed_text(self.obs.text)
             embedding = torch.cat((embedding, embed_text), dim=1)
 
-        x = self.actor(embedding)
+        x = self.options(embedding)
+        option_dist = Categorical(logits=F.log_softmax(x, dim=1))
+        
+        x = self.actor(embedding, option)
         dist = Categorical(logits=F.log_softmax(x, dim=1))
 
         x = self.critic(embedding)
         value = x.squeeze(1)
-
-        x = self.options(embedding)
-        option_dist = Categorical(logits=F.log_softmax(x, dim=1))
-        # option_dist = F.log_softmax(x, dim=1)
 
         return dist, value, option_dist, memory
