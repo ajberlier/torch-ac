@@ -1,7 +1,9 @@
 import numpy
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Bernoulli
 from torch.distributions.categorical import Categorical
 
 import torch_ac
@@ -26,14 +28,12 @@ class PPOCAlgo(PPOAlgo):
         
         shape = (self.num_frames_per_proc, self.num_procs)
         self.options = torch.zeros(*shape, device=self.device, dtype=torch.int)
-        #TODO: fix tuple strucutre
+        self.option = random.randint(0, num_options-1)
+        self.options[0] = self.option
+        #TODO: fix tuple structure
         self.dones = torch.zeros(*shape, device=self.device)
-
-
-    def select_option(self, option_probs):
-        # sample option based on option probabilities
-        option_dist = torch.distributions.Categorical(option_probs)
-        option = option_dist.sample()
+        self.terms = torch.zeros(*shape, device=self.device, dtype=torch.bool)
+        self.term = True
 
 
     def update_parameters(self, exps):
@@ -44,9 +44,11 @@ class PPOCAlgo(PPOAlgo):
 
             log_entropies = []
             log_values = []
+            log_option_losses = []
+            log_option_entropies = []
             log_policy_losses = []
             log_value_losses = []
-            log_option_losses = []
+            log_term_losses =[]
             log_grad_norms = []
 
             for inds in self._get_batches_starting_indexes():
@@ -54,9 +56,11 @@ class PPOCAlgo(PPOAlgo):
                 # initialize batch values
                 batch_entropy = 0
                 batch_value = 0
+                batch_option_loss = 0
+                batch_option_entropy = 0
                 batch_policy_loss = 0
                 batch_value_loss = 0
-                batch_option_loss = 0
+                batch_term_loss = 0
                 batch_loss = 0
 
                 # initialize memory
@@ -68,25 +72,17 @@ class PPOCAlgo(PPOAlgo):
                     # sub-batch of experience
                     sb = exps[inds + i]
 
-                    # select options
-                    # option_select = []
-                    # for obs, option_dist in zip(sb.obs, sb.option_dist):
-                        # option = self.select_option(obs, option_dist)
-                    # option_probs = sb.obs.option_dist
-                    # option_dist = torch.distributions.Categorical(option_probs)
-                    # option_select = option_dist.sample()
-                    # TODO ?? option_select is unused
-
                     if self.arch.recurrent:
-                        dist, value, option_dist, memory = self.arch(sb.obs, memory * sb.mask)
+                        dist, value, option_dist, term_dist, memory = self.arch(sb.obs, sb.option, memory * sb.mask)
                     else:
-                        dist, value, option_dist = self.arch(sb.obs)
+                        dist, value, option_dist, term_dist = self.arch(sb.obs, sb.option)
                     
                     # actor - policy loss
+                    entropy = dist.entropy().mean()
                     ratio = torch.exp(dist.log_prob(sb.action) - sb.log_prob)
                     surr1 = ratio * sb.advantage
                     surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * sb.advantage
-                    policy_loss = -torch.min(surr1, surr2).mean()
+                    policy_loss = -torch.min(surr1, surr2).mean() - (self.entropy_coef * entropy) 
                     
                     # critic - value loss
                     value_clipped = sb.value + torch.clamp(value - sb.value, -self.clip_eps, self.clip_eps)
@@ -94,33 +90,38 @@ class PPOCAlgo(PPOAlgo):
                     surr2 = (value_clipped - sb.returnn).pow(2)
                     value_loss = torch.max(surr1, surr2).mean()
 
-                    # TODO: needs work vvv
-                    # termination condition
-                    # TODO option critic paper code uses "dones" from the environment, but I am not sure that is what was intended...
-                    option_termination_mask = torch.zeros_like(sb.dones)
-                    for i, done in enumerate(sb.dones):
-                        if done or sb.options[i] == 1:  # terminate option on episode end or when a new option is selected
-                            option_termination_mask[i] = 1
+                    # policy over options - option loss
+                    # Klissrov does not clip the options, why? 
+                    option_entropy = dist.entropy().mean()
+                    ratio = torch.exp(option_dist.log_prob(sb.option) - sb.log_prob)
+                    surr1 = ratio * sb.advantage
+                    surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * sb.advantage
+                    option_loss = -torch.min(surr1, surr2).mean() - (self.entropy_coef * option_entropy)
 
-                    # options - value loss
-                    option = F.softmax(option_dist.logits, dim=-1)
-                    option_loss = -torch.log(option.gather(1, sb.options.unsqueeze(1).long())).squeeze() * option_termination_mask
-                    option_loss = option_loss.mean()
+                    # termination loss
+                    term_reg = 0 # 0.1 used by sutton options framework original paper; i dont think the addition makes sense here....
+                    term_loss = -torch.min(term_dist.probs[torch.arange(term_dist.probs.size(0)), sb.option] * (value - sb.value + term_reg) * (1 - sb.done))
                     
                     # compute loss
-                    # TODO: should entropy be applied to the policy over options or intra-option policy? I think over options now... 
-                    entropy = dist.entropy().mean()
-                    # TODO: add self.option_loss_coef 
-                    self.option_loss_coef = 1
-                    loss = policy_loss - self.entropy_coef * entropy + self.value_loss_coef * value_loss + self.option_loss_coef * option_loss
+                    # TODO: add self.option_loss_coef as a hyperparameters?
+                    self.policy_loss_coef = 1
+                    self.term_loss_coef = 1
+                    self.value_loss_coef = 1
+                    self.option_loss_coef = 1 # 0.1 was used in klissrov
+                    loss = self.policy_loss_coef * policy_loss + \
+                            self.term_loss_coef * term_loss + \
+                            self.value_loss_coef * value_loss + \
+                            self.option_loss_coef * option_loss
                     # TODO: needs work ^^^
 
                     # update batch values
                     batch_entropy += entropy.item()
                     batch_value += value.mean().item()
                     batch_policy_loss += policy_loss.item()
+                    batch_term_loss += term_loss.item()
                     batch_value_loss += value_loss.item()
                     batch_option_loss += option_loss.item()
+                    batch_option_entropy += option_entropy.item()
                     batch_loss += loss
 
                     # update memories for next epoch
@@ -132,8 +133,10 @@ class PPOCAlgo(PPOAlgo):
                 batch_entropy /= self.recurrence
                 batch_value /= self.recurrence
                 batch_policy_loss /= self.recurrence
+                batch_term_loss /= self.recurrence
                 batch_value_loss /= self.recurrence
                 batch_option_loss /= self.recurrence
+                batch_option_entropy /= self.recurrence
                 batch_loss /= self.recurrence
 
                 # Update actor-critic
@@ -149,18 +152,21 @@ class PPOCAlgo(PPOAlgo):
                 log_entropies.append(batch_entropy)
                 log_values.append(batch_value)
                 log_policy_losses.append(batch_policy_loss)
+                log_term_losses.append(batch_term_loss)
                 log_value_losses.append(batch_value_loss)
                 log_option_losses.append(batch_option_loss)
+                log_option_entropies.append(batch_option_entropy)
                 log_grad_norms.append(grad_norm)
 
         # Log some values
-
         logs = {
             "entropy": numpy.mean(log_entropies),
             "value": numpy.mean(log_values),
             "policy_loss": numpy.mean(log_policy_losses),
+            "term_loss": numpy.mean(log_term_losses),
             "value_loss": numpy.mean(log_value_losses),
             "option_loss": numpy.mean(log_option_losses),
+            "option_entropy": numpy.mean(log_option_entropies),
             "grad_norm": numpy.mean(log_grad_norms)
         }
 
@@ -188,24 +194,28 @@ class PPOCAlgo(PPOAlgo):
         """
 
         for i in range(self.num_frames_per_proc):
-            # do one agent-environment interaction
-            # TODO handle recurrent flag? Or remove it
+            # Do one agent-environment interaction
+
             preprocessed_obs = self.preprocess_obss(self.obs, device=self.device)
             with torch.no_grad():
                 if self.arch.recurrent:
-                    dist, value, option_dist, memory = self.arch(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
+                    dist, value, option_dist, term_dist, memory = self.arch(preprocessed_obs, self.options[i], self.memory * self.mask.unsqueeze(1))
                 else:
-                    dist, value, option_dist = self.arch(preprocessed_obs)
-            option = option_dist.sample()
+                    dist, value, option_dist, term_dist = self.arch(preprocessed_obs, self.options[i])
+
+            # if terminated, choose new option
+            if self.term:
+                self.option = option_dist.sample()
+
+            # select action
             action = dist.sample()
 
+            # step environment
             obs, reward, terminated, truncated, _ = self.env.step(action.cpu().numpy())
             done = tuple(a | b for a, b in zip(terminated, truncated))
-            #TODO: need to account for deliberation cost
 
-            # add option_dist to prior obs
-            for n_proc in range(self.num_procs):
-                self.obs[n_proc]['option_dist'] = option_dist.logits.detach().cpu().numpy()[n_proc, :]
+            # update option termination
+            self.term = bool(Bernoulli(term_dist.probs[:, self.option]).sample().item())
 
             # update experiences values
             self.obss[i] = self.obs
@@ -225,7 +235,9 @@ class PPOCAlgo(PPOAlgo):
             else:
                 self.rewards[i] = torch.tensor(reward, device=self.device)
             self.log_probs[i] = dist.log_prob(action)
-            self.options[i] = option
+            self.options[i] = self.option
+
+            self.terms[i] = self.term
             self.dones[i] = torch.tensor(done, device=self.device, dtype=torch.bool)
 
             # update log values
@@ -250,18 +262,10 @@ class PPOCAlgo(PPOAlgo):
         # This gets a single additional next_value
         preprocessed_obs = self.preprocess_obss(self.obs, device=self.device)
         with torch.no_grad():
-            # handle 4 len tuple from OCModel, unlike the other 3 len tuples
-            # from OCModel its (dist, value, option_dist, memory)
             if self.arch.recurrent:
-                dist, next_value, option_dist, memory = self.arch(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
+                dist, next_value, option_dist, term_dist, memory = self.arch(preprocessed_obs, self.options[i], self.memory * self.mask.unsqueeze(1))
             else:
-                # TODO confirm arg order
-                dist, next_value, option_dist = self.arch(preprocessed_obs)
-
-            # if self.arch.recurrent:
-            #     _, next_value, _ = self.arch(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
-            # else:
-            #     _, next_value = self.arch(preprocessed_obs)
+                dist, next_value, option_dist, term_dist = self.arch(preprocessed_obs, self.options[i])
 
         for i in reversed(range(self.num_frames_per_proc)):
             next_mask = self.masks[i+1] if i < self.num_frames_per_proc - 1 else self.mask
@@ -297,8 +301,9 @@ class PPOCAlgo(PPOAlgo):
         exps.advantage = self.advantages.transpose(0, 1).reshape(-1)
         exps.returnn = exps.value + exps.advantage
         exps.log_prob = self.log_probs.transpose(0, 1).reshape(-1)
-        exps.dones = self.dones.transpose(0, 1).reshape(-1)
-        exps.options = self.options.transpose(0, 1).reshape(-1)
+        exps.done = self.dones.transpose(0, 1).reshape(-1)
+        exps.option = self.options.transpose(0, 1).reshape(-1)
+
 
         # Preprocess experiences
 
